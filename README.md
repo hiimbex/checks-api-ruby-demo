@@ -85,196 +85,203 @@ Each app is free to update the status of each Check Run it creates asyncronously
 
 ![Checks API timing diagram illustrating the above flow](images/timing%20diagram.png)
 
-## Receiving check events
+## Receiving Checks API events
 
-Let's update our server to *just* handle the check suite created event right now:
-
-``` ruby
-post '/event_handler' do
-  payload = JSON.parse(params[:payload])
-
-  case request.env['HTTP_X_GITHUB_EVENT']
-  when "check_suite"
-    if payload['action'] == 'requested' || payload['action'] == 'rerequested'
-      create_check_run(payload)
-    end
-  end
-end
-
-helpers do
-  def create_check_run(payload)
-    puts "It's #{payload['repository']['name']}"
-  end
-end
-```
-
-What's going on? Every event that {{ site.data.variables.product.product_name }} sends out includes an `X-{{ site.data.variables.product.product_name }}-Event`
-HTTP header. We'll only care about the check suite events for now. From there, we'll
-take the payload of information, and return the repository name field. In this scenario,
-our server is concerned not just with the check suite create, but when someone requests
-the check suite be re-run, including when new commits are pushed to the triggering pull request.
-
-To test out this proof-of-concept, make some changes in a branch in your test
-repository, and open a pull request. Your server should respond accordingly!
-
-## Working with check suits and check runs
-
-TODO
-
-With our server in place, we're ready to start our first requirement, which is
-setting (and updating) CI statuses. Note that at any time you update your server,
-you can click **Redeliver** to send the same payload. There's no need to make a
-new pull request every time you make a change!
-
-Since we're interacting with the {{ site.data.variables.product.product_name }} API, we'll use [Octokit.rb][octokit.rb]
-to manage our interactions. We'll configure that client with
-[a personal access token][access token]:
+Great, so we know now that checks are kicked off by the creation of a Check Suite. Let's update our boilerplate code to handle `check_suite` events. Open _server.rb_, and find the events handler.
 
 ``` ruby
-# Never, ever, hardcode app tokens or other secrets in your code!
-# Always extract from a runtime source, like an environment variable.
+########## Events
 #
-PRIVATE_KEY = OpenSSL::PKey::RSA.new(ENV['GITHUB_PRIVATE_KEY'].gsub('\n', "\n")) # convert newlines
-APP_IDENTIFIER = ENV['GITHUB_APP_IDENTIFIER']
+# This is the webhook endpoint that GH will call with events, and hence where we will do our event handling
+#
 
-# Before each request, instantiate an Octokit client using a JWT that we generate with our private key
-before do
-  payload = {
-      # issued at time
-      iat: Time.now.to_i,
-      # JWT expiration time (10 minute maximum)
-      exp: Time.now.to_i + (10 * 60),
-      # The {{ site.data.variables.product.product_name }} App's identifier
-      iss: APP_IDENTIFIER
-  }
-  JWT.encode(payload, PRIVATE_KEY, 'RS256')
-  @client ||= Octokit::Client.new(bearer_token: get_jwt)
-end
-```
+  post '/event_handler' do
+    # First, a bit of security
+    check_signature!
 
-TODO we need to create the check run
-After that, we'll just need to update the pull request on {{ site.data.variables.product.product_name }} to make clear
-that we're processing on the CI:
+    # Determine what kind of event this is, and take action as appropriate
+    event = request.env['HTTP_X_GITHUB_EVENT']
+    action = @payload['action'] || nil
 
-``` ruby
-def create_check_run(payload)
-  # First, we need to exchange our JWT for an installation token against the repository that triggered this check suite
-  token = get_installation_token(payload)
-  installation_client = Octokit::Client.new(bearer_token: token)
-
-  # Octokit doesn't yet support the Checks API, but it does provide generic HTTP methods we can use!
-  # https://developer.github.com/v3/checks/runs/#create-a-check-run
-  result = installation_client.post("#{payload['repository']['url']}/check-runs", {
-      accept: 'application/vnd.github.antiope-preview+json', # This header is necessary for beta access to Checks API
-      name: 'Awesome CI',
-      head_branch: payload['check_suite']['head_branch'],
-      head_sha: payload['check_suite']['head_sha'],
-      status: :in_progress
-  })
-
-  # Assuming that this notifcation goes through, we can start our actual build run here.
-
-  result.attrs
-end
-
-```
-
-We're doing three very basic things here:
-
-TODO no we're not.
-* we're looking up the full name of the repository
-* we're looking up the last SHA of the pull request
-* we're setting the status to "pending"
-
-That's it! From here, you can run whatever process you need to in order to execute
-your test suite. Maybe you're going to pass off your code to Jenkins, or call
-on another web service via its API, like [Travis][travis api]. After that, you'd
-be sure to update the status once more. In our example, we'll just set it to `"success"`:
-
-``` ruby
-   .
-   .
-   .
-
-   case request.env['HTTP_X_GITHUB_EVENT']
-    when 'check_suite'
-      # A new check_suite has been created or rerequested. Create a new check_run with status "running"
-      if payload['action'] == 'requested' || payload['action'] == 'rerequested'
-        create_check_run(payload)
+    case event
+      when :check_suite
+          # A new check_suite has been created or rerequested. Create a new check_run with status "running"
+          if payload['action'] == :requested || @payload['action'] == :rerequested
+            create_check_run
+          end
+    
+        'ok'  # we have to return _something_ ;)
       end
 
-    when 'check_run'
+```
+
+What's going on? Every event that {{ site.data.variables.product.product_name }} sends out includes a request header called `HTTP_X_GITHUB_EVENT` HTTP header. This header encodes the event type. Right now, we're only interested in events of type `check_suite`, which will be emitted when a new Check Suite is created.
+
+Each event has an additional `action` field that indicates what's going on. For `check_suite`, this field can take one of the following values: `requested`, `rerequested`, TODO. We care about the first two: They indicate that either a new `check_suite` has been created, or an existing one is being re-run.
+
+Once we have identified whether the received event is a new (or re-run) `check_suite`, we take action by calling `create_check_run`, a helper method to actually kick off our CI's test suite. Let's write that method now.
+
+## Creating a Check Run
+
+The `create_check_run` method won't do much—it will request a new Check Run object from {{ site.data.variables.product.product_name }}. Normally, having done that, we would at this point kick off the actual CI process, but that's for you to add later!
+
+``` ruby
+########## Helpers
+#
+# These functions are going to help us do some tasks that we don't want clogging up the happy paths above, or
+# that need to be done repeatedly. You can add anything you like here, really!
+#
+
+  helpers do
+
+    # Create a new Check Run
+    def create_check_run
+      # First, we need to exchange our JWT for an installation token against the repository that triggered this
+      # check suite. This is an important bit of authentication
+      token = get_installation_token
+      installation_client = Octokit::Client.new(bearer_token: token)
+
+      # Octokit doesn't yet support the Checks API, but it does provide generic HTTP methods we can use!
+      # https://developer.github.com/v3/checks/runs/#create-a-check-run
+      result = installation_client.post("#{@payload['repository']['url']}/check-runs", {
+          accept: 'application/vnd.github.antiope-preview+json', # This header is necessary for beta access to Checks API
+          name: 'Awesome CI',
+          head_branch: @payload['check_suite']['head_branch'],
+          head_sha: @payload['check_suite']['head_sha'],
+          status: :in_progress
+      })
+
+      # Assuming that this notifcation goes through, we would start our actual build run here.
+
+      result.attrs
+    end
+```
+
+The function does three things in turn.
+
+1) It requests an installation token. This token is a special API token with a limited lifetime that can only be used to make API requests against a specific repository, in this case the repository with the new Check Suite. We have to request one of these tokens before we can do anything else.
+
+2) It `POST`s to the `checks/runs` endpoint to create a new Check Run. This endpoint has several required fields, and a few optional.
+    * We have to give the Check Run a useful and descriptive name
+    * We have to indicate which branch the check run is operating on—we get this from the `check_suite` event, but really it could be any branch.
+    * We have to indicate the specific commit on that branch. Again, we get this from the `check_suite` event.
+    * We need to indicate a status. If this field is omitted, it is assumed to be `queued`, but it can also be `in_progress` (what we indicate), or `completed`.
+
+    We could also provide more details about what we are up to. We could provide a set of actions for the user to follow up with. We could provide a URL for the user to follow to learn more about the run.
+    
+    You can read more about the options on the [Run Check creation reference page][create a run check].
+    
+3) Then, normally, after all this, you would kick off the actual CI run. We _don't_ do that here. 
+ 
+To test out this proof-of-concept, first run the server from your terminal by entering
+
+``` bash
+ruby server.rb
+```
+
+If it doesn't start, don't forget to set the necessary environment variables as per the [Building Your First App guide][my first app]!
+
+And then open a pull request in one of the repositories where you have installed our app. Your server should respond accordingly by creating a check run on your pull request. It will look like this:
+
+![page showing our check run is created and in progress](images/check%20run%20in%20progress.png)
+
+Great! At this point we can create a Check Run. Let's now update it's status to indicate when it has been completed.
+
+## Updating Check Runs
+
+Now, we imagine that our CI server has completed its test suite, and needs to update the Check Run to indicate success or failure. For our purposes, we aren't actually going to fire off a test suite. Instead we are going to borrow some other trigger, just for demonstration purposes. {{ site.data.variables.product.product_name }} not only notifies us of `check_suite` events, but also `check_run` events. These events are fired off when a new `check_run` is created, or completed. We can just wait for our own Check Run to result in such an event, and then we will update it's status to complete. 
+
+First, let's update the event handler code to watch for `check_run` events:
+
+``` ruby
+########## Events
+#
+# This is the webhook endpoint that GH will call with events, and hence where we will do our event handling
+#
+
+  post '/event_handler' do
+    
+    ...
+
+    case event
+    
+    ...
+    
+    when :check_run
       # GH confirms our new check_run has been created, or rerequested. Update it to "completed"
-      if payload['action'] == 'created' || payload['action'] == 'rerequested'
-        update_check_run(payload)
+      if action == :created || action == :rerequested
+        update_check_run
       end
     end
-
-    .
-    .
-    .
 ```
+
+Again, we're watching for `check_run` events with an action of `created` or `rerequested` so we can capture both new Check Runs, and the case where the user has requested an existing Check Run be re-run.
+
+Now, let's write the helper function that will do the updating
 
 ``` ruby
-def update_check_run(payload)
-  token = get_installation_token(payload)
-  installation_client = Octokit::Client.new(bearer_token: token)
-  # Update the check run to a success state. We could include other information like line numbers, comments,
-  # or other things to help in the case of failure
-  # Also, normally, we would make this call when we were actually done with our CI, not as an artificial
-  # side effect of a check run being initiated.
+########## Helpers
+#
+# These functions are going to help us do some tasks that we don't want clogging up the happy paths above, or
+# that need to be done repeatedly. You can add anything you like here, really!
+#
 
-  # Octokit doesn't yet support the Checks API, but it does provide generic HTTP methods we can use!
-  # https://developer.github.com/v3/checks/runs/#update-a-check-run
-  # notice the verb! PATCH!
-  result = installation_client.patch(payload['check_run']['url'], {
-      accept: 'application/vnd.github.antiope-preview+json', # This header is necessary for beta access to Checks API
-      name: 'Awesome CI',
-      status: :completed,
-      conclusion: :success,
-      completed_at: Time.now.utc.iso8601
-  })
-
-  result.attrs
-end
+  helpers do
+  
+  ...
+  
+      # Update an existing Check Run
+      def update_check_run
+            token = get_installation_token
+            installation_client = Octokit::Client.new(bearer_token: token)
+            # Update the check run to a success state. We could include other information like line numbers, comments,
+            # or other things to help in the case of failure
+            # Also, normally, we would make this call when we were actually done with our CI, not as an artificial
+            # side effect of a check run being initiated.
+      
+            # Octokit doesn't yet support the Checks API, but it does provide generic HTTP methods we can use!
+            # https://developer.github.com/v3/checks/runs/#update-a-check-run
+            # notice the verb! PATCH!
+            result = installation_client.patch(@payload['check_run']['url'], {
+                accept: 'application/vnd.github.antiope-preview+json', # This header is necessary for beta access to Checks API
+                name: 'Awesome CI',
+                status: :completed,
+                conclusion: :success,
+                completed_at: Time.now.utc.iso8601
+            })
+      
+            result.attrs
+          end
 ```
 
-## Going further
+
+This method is doing two things:
+
+1) It requests an installation token, just like before.
+
+2) It `PATCH`s the `checks/runs` endpoint to update an existing Check Run. We get this endpoint from the `check_run` event, which is super handy. This endpoint has several required fields, and a few optional.
+    * We have to give the Check Run a useful and descriptive name
+    * We may change the status of the Check Run, which we do. We update it to `completed`, but we could change it to `queued` or `in_progress`.
+    * Because we have indicated the Check Run is completed, we have to indicate the outcome of the check. We can choose `success`, `failure`, `neutral`, `cancelled`, `timed_out`, or `action_required`, and here we indicate `success`, just because.
+    * Because we have indicated the Check Run is completed, we also have to provide a timestamp for when it was completed.
+    
+    We could also provide more details about what we are up to. We could provide a set of actions for the user to follow up with. We could provide a URL for the user to follow to learn more about the run.
+    
+    You can read more about the options on the [Run Check update reference page][update a run check].
+
+And that's it! Test out the new code by re-running the server, and clicking **re-run** on the pull request checks page. If everything is working, you'll see the Check Run update to complete!
+
+![page showing our check run has been updated to complete](images/check%20run%20updated.png)
+
+
+## Going Further
 
 Check suites and runs are powerful entities, and you can do a lot more with them than we have here in this demo. For example, on failing runs, you can indicate files and line numbers to pinpoint the exact cause of the failure, You can also provide useful commentary on why a check run passed or failed, for example the total run time, memory consumption, or the results of upstream operations. Read more about how to use these features in the [Checks API documentation][checks API].
 
-## Conclusion
+You can download the final source code for this guide from the [platform samples repository][platform samples]. 
 
-At {{ site.data.variables.product.product_name }}, we've used a version of [Janky][janky] to manage our CI for years.
-The basic flow is essentially the exact same as the server we've built above.
-At {{ site.data.variables.product.product_name }}, we:
+We're excited to see what you build! Feel free to share your creations and your success with us TODO HOW!?
 
-* Fire to Jenkins when a pull request is created or updated (via Janky)
-* Wait for a response on the state of the CI
-* If the code is green, we merge the pull request
-
-All of this communication is funneled back to our chat rooms. You don't need to
-build your own CI setup to use this example.
-You can always rely on [{{ site.data.variables.product.product_name }} integrations][integrations].
-
-
-
-private keys:
-```bash
-export GITHUB_PRIVATE_KEY=`awk '{printf "%s\\n", $0}' awesome-ci-2.2018-05-15.private-key.pem`
-```
-
-```bash
-export GITHUB_WEBHOOK_SECRET="my secret"
-```
-
-```bash
-export GITHUB_APP_IDENTIFIER=12247
-```
-
-https://github.com/settings/apps  app settings
-
-TODO
 
 [checks API]: /v3/checks
 [app boilerplate]: https://github.com/github/platform-samples/tree/master/apps/ruby/building-a-ci-server
@@ -282,25 +289,6 @@ TODO
 [ngrok]: https://ngrok.com/
 [app settings]: https://github.com/settings/apps
 [installation settings]: https://github.com/settings/installations
-
-
-
-
-
-
-
-
-
-
-
-[ngrok]: https://ngrok.com/
-[using ngrok]: /webhooks/configuring/#using-ngrok
-[platform samples]: https://github.com/github/platform-samples/tree/master/api/ruby/building-a-ci-server-app
-[Sinatra]: http://www.sinatrarb.com/
-[octokit.rb]: https://github.com/octokit/octokit.rb
-[access token]: https://help.github.com/articles/creating-an-access-token-for-command-line-use
-[travis api]: https://api.travis-ci.org/docs/
-[janky]: https://github.com/github/janky
-[heaven]: https://github.com/atmos/heaven
-[hubot]: https://github.com/github/hubot
-[integrations]: https://github.com/integrations
+[create a check run]: /v3/checks/runs/#create-a-check-run
+[update a check run]: /v3/checks/runs/#update-a-check-run
+[platform samples]: https://github.com/github/platform-samples/tree/master/app/ruby/building-a-ci-server
