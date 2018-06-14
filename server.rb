@@ -110,7 +110,7 @@ class GHAapp < Sinatra::Application
       when :created
         # Notice that we get notifications of the check runs created by _other_ systems than ours!
         # We need to be selective, hence the conditional on the app id. We only want to process our _own_
-        # check runs.
+        # check runs. That's why we check if the app id is == APP_IDENTIFIER
         initiate_check_run if @payload['check_run']['app']['id'] == APP_IDENTIFIER
       when :rerequested
         # initiate_check_run
