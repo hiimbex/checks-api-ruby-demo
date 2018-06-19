@@ -87,7 +87,7 @@ Each app is free to update the status of each Check Run it creates asyncronously
 
 ## Receiving Checks API events
 
-Great, so we know now that checks are kicked off by the creation of a [Check Suite event](https://developer.github.com/v3/activity/events/types/#checksuiteevent). Let's update our boilerplate code to handle `check_suite` events. Open _`server.rb`_, and find the events handler.
+Great, so we know now that checks are kicked off by the creation of a [Check Suite event](https://developer.github.com/v3/activity/events/types/#checksuiteevent). Let's update our boilerplate code to handle `check_suite` events. Open _server.rb_, and find the events handler.
 
 ``` ruby
 ########## Events
